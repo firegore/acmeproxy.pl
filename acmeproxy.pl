@@ -107,9 +107,15 @@ sub handle_request {
   # Remove the DNS record before adding it
   # This is to prevent acme.sh from failing if the record already exists
   # It really should be handled in acme.sh dnssapi/acme_proxy.sh but it's not
-  acme_cmd("rm", $data->{fqdn}, $data->{value}) if ($command eq 'add');
+  acme_cmd("rm", $data->{fqdn}, $data->{value}, 0) if ($command eq 'add');
 
-  $c->render(text => acme_cmd($command, $data->{fqdn}, $data->{value}));
+  if ($c->req->headers->accept eq 'application/json') {
+    logg 'Wanting JSON Response';
+    $c->render(json => acme_cmd($command, $data->{fqdn}, $data->{value}, 1));
+  } else {
+    logg 'Wanting Text Response';
+    $c->render(text => acme_cmd($command, $data->{fqdn}, $data->{value}, 0));
+  }
 }
 
 # Mojo web routes
@@ -121,7 +127,12 @@ any '/*' => sub ($c) { $c->render(text => 'I am not a teapot. Please leave me al
 
 # Log all HTTP requests
 hook before_dispatch => sub ($c) {
-    logg join(' ', 'HTTP:', $c->tx->remote_address, $c->req->method, $c->req->url->to_abs);
+    logg join(' ', 'HTTP:', $c->tx->remote_address, $c->req->method, $c->req->url->to_abs, $c->req->headers->content_type, $c->req->headers->accept, $c->req->body);
+};
+
+
+hook after_dispatch => sub ($c) {
+    logg join(' ', 'HTTPout:', $c->res->headers->content_type, ' - ', $c->res->body);
 };
 
 # We used acme.sh to generate our TLS certificate so its cron job should update our cert regularly
@@ -144,10 +155,11 @@ app->start('daemon', '-m', 'production', '-l', "https://$config->{bind}?cert=$ac
 # Add or remove a DNS record using the configured acme.sh DNS provider
 # Hijacks acme.sh to use it's dnsapi library.
 # Crude but effective. Slimy yet satisfying.
-sub acme_cmd ($action, $fqdn, $value) {
+sub acme_cmd ($action, $fqdn, $value, $json) {
   # Let's not pass weird characters to a shell
   return "invalid characters in fqdn" unless ($fqdn =~ /^[\w_\.-]+$/);
   return "invalid characters in value" unless ($value =~ /^[\w_\.-]+$/);
+  my $fqdn_unsanitized = $fqdn;
   $fqdn =~ s/\.+$//; # Some acme.sh plugins add an additional . to the end of the hostname
 
   my $shellcmd = '/usr/bin/env bash -c "' .
@@ -157,7 +169,11 @@ sub acme_cmd ($action, $fqdn, $value) {
   logg "executing: $shellcmd";
 
   # acme.sh/dnslib/dns_acmeproxy.sh explicitly looks for the quotes around $value to determine success
-  return "success: $fqdn \"$value\"" unless (system("$shellcmd"));
+  if($json) {
+    return {fqdn => $fqdn_unsanitized, value => $value} unless (system("$shellcmd"));
+  } else {
+    return "success: $fqdn \"$value\"" unless (system("$shellcmd"));
+  }
   return "failed. check acmeproxy.pl logs";
 }
 
